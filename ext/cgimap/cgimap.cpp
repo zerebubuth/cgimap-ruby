@@ -10,6 +10,14 @@
 #include <cgimap/routes.hpp>
 #include <cgimap/data_selection.hpp>
 #include <cgimap/backend.hpp>
+#include <cgimap/config.hpp>
+#ifdef ENABLE_APIDB
+#include <cgimap/backend/apidb/apidb.hpp>
+#endif
+#ifdef ENABLE_PGSNAPSHOT
+#include <cgimap/backend/pgsnapshot/pgsnapshot.hpp>
+#endif
+#include <cgimap/backend/staticxml/staticxml.hpp>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/classification.hpp>
@@ -58,9 +66,22 @@ struct construct_rate_limiter {
 typedef boost::shared_ptr<data_selection::factory> factory_ptr_t;
 
 factory_ptr_t create_backend_(Hash h) {
-   bpo::variables_map vm = convert_hash_to_vm(h);
+  static bool once = true;
+  bpo::variables_map vm = convert_hash_to_vm(h);
 
-   return create_backend(vm);
+  if (once) {
+    once = false;
+
+#if ENABLE_APIDB
+    register_backend(make_apidb_backend());
+#endif
+#if ENABLE_PGSNAPSHOT
+    register_backend(make_pgsnapshot_backend());
+#endif
+    register_backend(make_staticxml_backend());
+  }
+
+  return create_backend(vm);
 }
 
 // adapt the rack response for use by cgimap
