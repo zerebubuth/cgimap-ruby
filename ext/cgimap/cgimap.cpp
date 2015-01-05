@@ -18,6 +18,7 @@
 #include <cgimap/backend/pgsnapshot/pgsnapshot.hpp>
 #endif
 #include <cgimap/backend/staticxml/staticxml.hpp>
+#include <cgimap/process_request.hpp>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/classification.hpp>
@@ -86,7 +87,7 @@ factory_ptr_t create_backend_(Hash h) {
 
 // adapt the rack response for use by cgimap
 struct rack_output_buffer : public output_buffer {
-   explicit rack_output_buffer(Hash env);
+   explicit rack_output_buffer(Object req);
    virtual ~rack_output_buffer();
 
    virtual int write(const char *buffer, int len);
@@ -109,7 +110,7 @@ struct rack_request : public request {
 
    virtual const char *get_param(const char *key);
    virtual boost::shared_ptr<output_buffer> get_buffer();
-   virtual std::string extra_headers();
+   virtual std::string extra_headers() const;
    virtual void finish();
 
 private:
@@ -117,9 +118,11 @@ private:
    std::map<std::string, std::string> m_params;
 };
 
-rack_output_buffer::rack_output_buffer(Hash env)
+rack_output_buffer::rack_output_buffer(Object req)
    : m_closed(false)
    , m_written(0) {
+   Hash env(req.call("env"));
+
    // env['rack.hijack'].call starts the hijacking
    Object hijack = env[String("rack.hijack")];
 
@@ -156,9 +159,27 @@ int rack_output_buffer::write(const char *buffer, int len) {
       throw std::runtime_error("Attempt to write to a closed output buffer.");
    }
 
-   // try to avoid copying as much as possible...
-   Builtin_Object<RString, T_STRING> rb_buf(protect(rb_str_new, buffer, len));
-   int written = m_io.call<int>("write", rb_buf);
+   // ugh... nasty hack to pull out the header/status line first.
+   // TODO: convert cgimap to return status/headers first without
+   // stringifying them, then write to an IO for the body.
+   if (m_written == 0) {
+     if (len < 8) { throw std::runtime_error("First write too short."); }
+     if (strncmp(buffer, "Status: ", 8) != 0) {
+       throw std::runtime_error("First line should be status.");
+     }
+     char *end = (char *)memmem(buffer, len, "\r\n", 2);
+     if (end == NULL) { throw std::runtime_error("First line too short."); }
+     int written = from_ruby<int>(m_io.call<String>("write", "HTTP/1.1 "));
+     m_written += written;
+     if (written < 9) { throw std::runtime_error("First write too short."); }
+
+     // adjust buffer to account for what we already wrote
+     buffer += 8;
+     len -= 8;
+   }
+
+   String s(std::string(buffer, len));
+   int written = from_ruby<int>(m_io.call<String>("write", s));
    m_written += written;
    return written;
 }
@@ -173,11 +194,15 @@ int rack_output_buffer::close() {
    return 0;
 }
 
-rack_request::rack_request(Object req)
-   : m_output_buffer(new rack_output_buffer(Hash(req.attr_get("env"))))
-   , m_params() {
+void rack_output_buffer::flush() {
+  m_io.call("flush");
+}
 
-   Hash params(req.attr_get("env"));
+rack_request::rack_request(Object req)
+  : m_output_buffer(new rack_output_buffer(req))
+  , m_params() {
+
+  Hash params(req.call("env"));
 
    // note that we copy the environment into a C++ structure here
    // because we need to control the lifetime. the interface to
@@ -217,7 +242,7 @@ boost::shared_ptr<output_buffer> rack_request::get_buffer() {
    return m_output_buffer;
 }
 
-std::string rack_request::extra_headers() {
+std::string rack_request::extra_headers() const {
    // because we're hijacking the Rack socket, we take over complete
    // responsibility for the socket from that point onwards. this
    // also means Keep-Alive. since re-implementing Keep-Alive is
@@ -233,6 +258,12 @@ std::string rack_request::extra_headers() {
 }
 
 void rack_request::finish() {
+}
+
+void process_request_(Object r_req, rate_limiter &rl, const std::string &generator,
+                      routes &r, factory_ptr_t factory) {
+  rack_request req(r_req);
+  process_request(req, rl, generator, r, factory);
 }
 
 } // anonymous namespace
@@ -257,4 +288,5 @@ extern "C" void Init_cgimap() {
       ;
 
    rb_mCgimap.define_singleton_method("create_backend", &create_backend_);
+   rb_mCgimap.define_singleton_method("process_request", &process_request_);
 }
