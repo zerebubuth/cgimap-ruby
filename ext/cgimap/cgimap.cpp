@@ -25,6 +25,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/foreach.hpp>
+#include <boost/format.hpp>
 
 using namespace Rice;
 namespace bpo = boost::program_options;
@@ -90,7 +91,7 @@ factory_ptr_t create_backend_(Hash h) {
 
 // adapt the rack response for use by cgimap
 struct rack_output_buffer : public output_buffer {
-   explicit rack_output_buffer(Object req);
+   explicit rack_output_buffer(Object io);
    virtual ~rack_output_buffer();
 
    virtual int write(const char *buffer, int len);
@@ -99,17 +100,35 @@ struct rack_output_buffer : public output_buffer {
    virtual void flush();
 
 private:
+   Object m_io;
    bool m_closed;
    int m_written;
-   Object m_io;
 };
 
-// encapsulate a rack request, as used (?) internally by rails
+// implementation of output_buffer which actually buffers all
+// of its output in a string.
+struct string_output_buffer : public output_buffer {
+  string_output_buffer();
+  virtual ~string_output_buffer();
+
+  virtual int write(const char *buffer, int len);
+  virtual int written();
+  virtual int close();
+  virtual void flush();
+
+  std::string value() const;
+
+private:
+  std::ostringstream m_stream;
+  int m_written;
+};
+
+// encapsulate a rack request using full socket hijacking,
 // and adapt it to the request interface that cgimap uses
 // internally.
-struct rack_request : public request {
-  explicit rack_request(Object req);
-  virtual ~rack_request();
+struct hijack_rack_request : public request {
+  explicit hijack_rack_request(Object io, Hash params);
+  virtual ~hijack_rack_request();
 
   const char *get_param(const char *key);
   void dispose();
@@ -124,29 +143,35 @@ private:
    std::map<std::string, std::string> m_params;
 };
 
-rack_output_buffer::rack_output_buffer(Object req)
-   : m_closed(false)
-   , m_written(0) {
-   Hash env(req.call("env"));
+// encapsulate a rack request using a buffered string response
+// type, and adapt it to the request interface that cgimap uses
+// internally.
+struct buffered_rack_request : public request {
+  explicit buffered_rack_request(Object req);
+  virtual ~buffered_rack_request();
 
-   // env['rack.hijack'].call starts the hijacking
-   Object hijack = env[String("rack.hijack")];
+  const char *get_param(const char *key);
+  void dispose();
 
-   if (hijack.is_nil()) {
-      // the Rack we're running in doesn't support hijacking
-      throw std::runtime_error("The version of Rack in use does not support "
-                               "socket hijacking, which cgimap-ruby requires.");
-   }
+  Object rack_response() const;
 
-   // perform the hijack and grab the socket to use later.
-   hijack.call("call");
-   m_io = env[String("rack.hijack_io")];
+protected:
+  void write_header_info(int status, const headers_t &headers);
+  boost::shared_ptr<output_buffer> get_buffer_internal();
+  void finish_internal();
 
-   if (m_io.is_nil()) {
-      // something went wrong with the hijack :-(
-      throw std::runtime_error("Unable to hijack Rack socket. Cgimap-ruby "
-                               "won't work.");
-   }
+private:
+  int m_status;
+  request::headers_t m_response_headers;
+  boost::shared_ptr<string_output_buffer> m_output_buffer;
+  std::map<std::string, std::string> m_params;
+  std::string m_request_uri;
+};
+
+rack_output_buffer::rack_output_buffer(Object io)
+  : m_io(io)
+  , m_closed(false)
+  , m_written(0) {
 }
 
 rack_output_buffer::~rack_output_buffer() {
@@ -204,11 +229,36 @@ void rack_output_buffer::flush() {
   m_io.call("flush");
 }
 
-rack_request::rack_request(Object req)
-  : m_output_buffer(new rack_output_buffer(req))
-  , m_params() {
+string_output_buffer::string_output_buffer()
+  : m_stream()
+  , m_written(0) {
+}
 
-  Hash params(req.call("env"));
+string_output_buffer::~string_output_buffer() {
+}
+
+int string_output_buffer::write(const char *buffer, int len) {
+  m_stream.write(buffer, len);
+  return m_stream.good() ? len : -1;
+}
+
+int string_output_buffer::written() {
+  return m_stream.tellp();
+}
+
+int string_output_buffer::close() {
+  return 0;
+}
+
+void string_output_buffer::flush() {
+}
+
+std::string string_output_buffer::value() const {
+  return m_stream.str();
+}
+
+std::map<std::string, std::string> hash_to_stdmap(Hash params) {
+   std::map<std::string, std::string> c_params;
 
    // note that we copy the environment into a C++ structure here
    // because we need to control the lifetime. the interface to
@@ -224,19 +274,31 @@ rack_request::rack_request(Object req)
       // interested in anything that's an internal Rack variable,
       // as cgimap would never understand it anyway.
       if (bal::all(key, bal::is_from_range('A', 'Z') || bal::is_from_range('_', '_'))) {
-         m_params.insert(std::make_pair(key, Object(itr->second).to_s().str()));
+         c_params.insert(std::make_pair(key, Object(itr->second).to_s().str()));
       }
    }
+
+   return c_params;
 }
 
-rack_request::~rack_request() {
+Hash headers_to_hash(const std::vector<std::pair<std::string, std::string> > &headers) {
+  typedef std::pair<std::string, std::string> pair_t;
+
+  Hash h;
+
+  BOOST_FOREACH(const pair_t &val, headers) {
+    h[String(val.first)] = String(val.second);
+  }
+
+  return h;
 }
 
-const char *rack_request::get_param(const char *key) {
+const char *get_param_stdmap(const std::map<std::string, std::string> &params,
+                             const char *key) {
    const std::string k(key);
-   std::map<std::string, std::string>::iterator itr = m_params.find(k);
+   std::map<std::string, std::string>::const_iterator itr = params.find(k);
 
-   if (itr == m_params.end()) {
+   if (itr == params.end()) {
       return NULL;
 
    } else {
@@ -244,10 +306,22 @@ const char *rack_request::get_param(const char *key) {
    }
 }
 
-void rack_request::dispose() {
+hijack_rack_request::hijack_rack_request(Object io, Hash params)
+  : m_output_buffer(new rack_output_buffer(io))
+  , m_params(hash_to_stdmap(params)) {
 }
 
-void rack_request::write_header_info(int status, const headers_t &headers) {
+hijack_rack_request::~hijack_rack_request() {
+}
+
+const char *hijack_rack_request::get_param(const char *key) {
+  return get_param_stdmap(m_params, key);
+}
+
+void hijack_rack_request::dispose() {
+}
+
+void hijack_rack_request::write_header_info(int status, const headers_t &headers) {
   std::ostringstream ostr;
   ostr << "Status: " << status << " " << status_message(status) << "\r\n";
   BOOST_FOREACH(const request::headers_t::value_type &header, headers) {
@@ -258,17 +332,115 @@ void rack_request::write_header_info(int status, const headers_t &headers) {
   m_output_buffer->write(&data[0], data.size());
 }
 
-boost::shared_ptr<output_buffer> rack_request::get_buffer_internal() {
+boost::shared_ptr<output_buffer> hijack_rack_request::get_buffer_internal() {
    return m_output_buffer;
 }
 
-void rack_request::finish_internal() {
+void hijack_rack_request::finish_internal() {
 }
 
-void process_request_(Object r_req, rate_limiter &rl, const std::string &generator,
+buffered_rack_request::buffered_rack_request(Object req)
+  : m_status(-1)
+  , m_response_headers()
+  , m_output_buffer(new string_output_buffer)
+  , m_params(hash_to_stdmap(Hash(req.call("env"))))
+  , m_request_uri() {
+
+  // figure out the full path: this seems to be the concatenation of
+  // script name and path info. it's arguable whether this should be
+  // the case, and perhaps we should only parse the path_info
+  // part... well, we can sort that out later.
+  std::string path = (boost::format("%1%%2%")
+                      % m_params["SCRIPT_NAME"]
+                      % m_params["PATH_INFO"]).str();
+
+  std::map<std::string, std::string>::iterator query_itr = m_params.find("QUERY_STRING");
+  if ((query_itr == m_params.end()) || (query_itr->second.empty())) {
+    m_request_uri = path;
+
+  } else {
+    m_request_uri = (boost::format("%1%?%2%") % path % query_itr->second).str();
+  }
+}
+
+buffered_rack_request::~buffered_rack_request() {
+}
+
+const char *buffered_rack_request::get_param(const char *key) {
+  // hack for request_uri - not sure if we're using it wrong
+  // or if the value is different between FCGI and Rack.
+  if (strncmp(key, "REQUEST_URI", 12) == 0) {
+    return m_request_uri.c_str();
+
+  } else {
+    return get_param_stdmap(m_params, key);
+  }
+}
+
+void buffered_rack_request::dispose() {
+}
+
+Object buffered_rack_request::rack_response() const {
+  Array response;
+
+  response.push(m_status);
+  response.push(headers_to_hash(m_response_headers));
+  Array body;
+  body.push(String(m_output_buffer->value()));
+  response.push(body);
+
+  return response;
+}
+
+void buffered_rack_request::write_header_info(int status, const request::headers_t &headers) {
+  m_status = status;
+  m_response_headers = headers;
+}
+
+boost::shared_ptr<output_buffer> buffered_rack_request::get_buffer_internal() {
+  return m_output_buffer;
+}
+
+void buffered_rack_request::finish_internal() {
+}
+
+Object process_request_(Object r_req, rate_limiter &rl, const std::string &generator,
                       routes &r, factory_ptr_t factory) {
-  rack_request req(r_req);
-  process_request(req, rl, generator, r, factory);
+  Hash env(r_req.call("env"));
+
+  // env['rack.hijack'].call starts the hijacking
+  Object hijack = env[String("rack.hijack")];
+
+  if (hijack.is_nil()) {
+    // the Rack we're running in doesn't support hijacking
+    throw std::runtime_error("The version of Rack in use does not support "
+                             "socket hijacking, which cgimap-ruby requires. "
+                             "Support for (partial) hijacking was added to "
+                             "WEBrick in 1.6.0.");
+  }
+
+  // perform the hijack and grab the socket to use later.
+  Object io;
+  try {
+    hijack.call("call");
+    io = env[String("rack.hijack_io")];
+
+  } catch (const Rice::Exception_Base &e) {
+    if (e.class_of().to_s().str() != std::string("NotImplementedError")) {
+      throw;
+    }
+  }
+
+  if (io.is_nil()) {
+    buffered_rack_request req(r_req);
+    process_request(req, rl, generator, r, factory);
+    return req.rack_response();
+
+  } else {
+    hijack_rack_request req(io, env);
+    process_request(req, rl, generator, r, factory);
+    return Object();
+  }
 }
 
 } // anonymous namespace
