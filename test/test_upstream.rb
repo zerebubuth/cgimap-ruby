@@ -57,7 +57,7 @@ class CgimapUpstreamTest < Minitest::Unit::TestCase
     flunk("unimplemented")
   end
 
-  def run_testcore(file)
+  def run_testcore(file, use_hijack)
     dir = File.dirname(file)
     osm_data = File.join(dir, "data.osm")
 
@@ -92,10 +92,19 @@ class CgimapUpstreamTest < Minitest::Unit::TestCase
     env = Rack::MockRequest.env_for(path, {:method => method})
     output = String.new
     io = StringIO.new(output)
-    # rack hijacking stuff
-    env.merge!({ 'rack.hijack?' => true,
-                 'rack.hijack' => Proc.new {},
-                 'rack.hijack_io' => io })
+    if use_hijack
+      # rack hijacking stuff
+      env.merge!({ 'rack.hijack?' => true,
+                   'rack.hijack' => Proc.new {},
+                   'rack.hijack_io' => io })
+
+    else
+      # partial hijacking stuff
+      env.merge!({ 'rack.hijack?' => true,
+                   'rack.hijack' => lambda { raise NotImplementedError, "only partial hijack is supported."},
+                   'rack.hijack_io' => nil })
+    end
+
     # extra stuff that cgimap complains it needs
     env.merge!({ 'REMOTE_ADDR' => '127.0.0.1' })
     # any extra stuff from the test case
@@ -109,40 +118,59 @@ class CgimapUpstreamTest < Minitest::Unit::TestCase
                                       'file' => osm_data })
     limiter = Cgimap::RateLimiter.new({})
     routes = Cgimap::Routes.new
-    Cgimap::process_request(req, limiter, "CgimapModuleTest", routes, factory)
+    actual_code, actual_headers, actual_body =
+      Cgimap::process_request(req, limiter, "CgimapModuleTest", routes, factory)
 
-    # parse the response back
-    # TODO: figure out some way of doing this without using
-    # undocumented internals of Net::HTTP.
-    reader = Net::InternetMessageIO.new(StringIO.new(output))
-    response = Net::HTTPResponse.read_new(reader)
-    response.reading_body(reader, method != "HEAD") {}
-
-    # check the response code first
+    # get expected code and reason
     code, reason = response_headers['STATUS'].split(/ /, 2)
-    assert_equal code, response.code, "Response code"
-    assert_equal reason, response.message, "Reason / Status message"
+
+    if use_hijack
+      # parse the response back
+      # TODO: figure out some way of doing this without using
+      # undocumented internals of Net::HTTP.
+      reader = Net::InternetMessageIO.new(StringIO.new(output))
+      response = Net::HTTPResponse.read_new(reader)
+      response.reading_body(reader, method != "HEAD") {}
+
+      # check the response reason where we have this
+      assert_equal reason, response.message, "Reason / Status message"
+
+      # actual headers object responds to hash lookups
+      actual_code = response.code
+      actual_headers = Hash[response.to_hash.map {|k, v| [k, v.join]}]
+      actual_body = response.body
+
+    else
+      actual_body = actual_body.join
+    end
+
+    # check response code
+    assert_equal code.to_i, actual_code.to_i, "Response code (expected=#{code.inspect}, actual=#{actual_code.inspect})"
+
+    # normalise keys to upcase
+    actual_headers = Hash[actual_headers.map {|k, v| [k.upcase, v]}]
 
     # check the headers in the test
     for k, v in response_headers
       # headers prefixed with ! denote negation
       if k.start_with?('!')
-        v2 = response[k[1..-1]]
+        v2 = actual_headers[k[1..-1]]
         assert_equal nil, v2
 
       elsif k != 'STATUS'
-        v2 = response.fetch(k)
+        v2 = actual_headers.fetch(k)
         assert_equal v, v2
       end
     end
+
     # and compare the body too
     content_type = response_headers['CONTENT-TYPE']
     unless content_type.nil?
       if content_type[0..7] == 'text/xml'
-        compare_content_xml(body, response.body)
+        compare_content_xml(body, actual_body)
 
       elsif content_type[0..8] == 'text/json'
-        compare_content_json(body, response.body)
+        compare_content_json(body, actual_body)
 
       else
         flunk "Unknown content type in response: #{content_type.inspect}"
@@ -156,8 +184,11 @@ class CgimapUpstreamTest < Minitest::Unit::TestCase
   Dir.glob("test/*.testcore").each do |dir|
     if File.exist?(File.join(dir, "data.osm"))
       Dir.glob(File.join(dir, "*.case")) do |file|
-        sym = file.gsub(/[^a-z0-9]/, "_").to_sym
-        define_method(sym, Proc.new { run_testcore(file) })
+        sym = (file.gsub(/[^a-z0-9]/, "_") + "_hijack").to_sym
+        define_method(sym, Proc.new { run_testcore(file, true) })
+
+        sym = (file.gsub(/[^a-z0-9]/, "_") + "_nohijack").to_sym
+        define_method(sym, Proc.new { run_testcore(file, false) })
       end
     end
   end
