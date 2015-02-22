@@ -20,15 +20,23 @@ If that doesn't work, please check the Bundler instructions for your OS. You sho
 
 Which might take some time. At the end of that, you should be able to compile the gem:
 
-    rake compile
+    bundle exec rake compile
 
 Or, if you installed cgimap in `$CGIMAP_DIR`:
 
-    rake compile -- --with-cgimap-include=$CGIMAP_DIR/include \
+    bundle exec rake compile -- --with-cgimap-include=$CGIMAP_DIR/include \
 	  --with-cgimap-lib=$CGIMAP_DIR/lib
+
+If you haven't installed cgimap, and just have compiled sources in a checked-out directory:
+
+    bundle exec rake compile -- --with-cgimap-include=$CGIMAP_DIR/include \
+	  --with-cgimap-lib=$CGIMAP_DIR/src/.libs
 
 I haven't yet got to the point of being able to install this as a gem, but you can play with it in Ruby by running this in `irb`:
 
     $:.unshift(File.expand('./lib'))
 	require 'cgimap'
 
+And you can run the tests with:
+
+    bundle exec rake test

@@ -1,6 +1,7 @@
 require 'minitest/autorun'
 require 'rack'
 require 'stringio'
+require 'net/http'
 require 'net/http/response'
 require 'rexml/document'
 require 'set'

@@ -10,6 +10,8 @@
 #include <cgimap/routes.hpp>
 #include <cgimap/data_selection.hpp>
 #include <cgimap/backend.hpp>
+#include <cgimap/output_buffer.hpp>
+#include <cgimap/request_helpers.hpp>
 #include <cgimap/config.hpp>
 #ifdef ENABLE_APIDB
 #include <cgimap/backend/apidb/apidb.hpp>
@@ -22,6 +24,7 @@
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/classification.hpp>
+#include <boost/foreach.hpp>
 
 using namespace Rice;
 namespace bpo = boost::program_options;
@@ -105,13 +108,16 @@ private:
 // and adapt it to the request interface that cgimap uses
 // internally.
 struct rack_request : public request {
-   explicit rack_request(Object req);
-   virtual ~rack_request();
+  explicit rack_request(Object req);
+  virtual ~rack_request();
 
-   virtual const char *get_param(const char *key);
-   virtual boost::shared_ptr<output_buffer> get_buffer();
-   virtual std::string extra_headers() const;
-   virtual void finish();
+  const char *get_param(const char *key);
+  void dispose();
+
+protected:
+  void write_header_info(int status, const headers_t &headers);
+  boost::shared_ptr<output_buffer> get_buffer_internal();
+  void finish_internal();
 
 private:
    boost::shared_ptr<rack_output_buffer> m_output_buffer;
@@ -238,26 +244,25 @@ const char *rack_request::get_param(const char *key) {
    }
 }
 
-boost::shared_ptr<output_buffer> rack_request::get_buffer() {
+void rack_request::dispose() {
+}
+
+void rack_request::write_header_info(int status, const headers_t &headers) {
+  std::ostringstream ostr;
+  ostr << "Status: " << status << " " << status_message(status) << "\r\n";
+  BOOST_FOREACH(const request::headers_t::value_type &header, headers) {
+    ostr << header.first << ": " << header.second << "\r\n";
+  }
+  ostr << "\r\n";
+  std::string data(ostr.str());
+  m_output_buffer->write(&data[0], data.size());
+}
+
+boost::shared_ptr<output_buffer> rack_request::get_buffer_internal() {
    return m_output_buffer;
 }
 
-std::string rack_request::extra_headers() const {
-   // because we're hijacking the Rack socket, we take over complete
-   // responsibility for the socket from that point onwards. this
-   // also means Keep-Alive. since re-implementing Keep-Alive is
-   // more than we really want to do, instead we inject a header to
-   // tell the client to close the connection.
-
-   // this really isn't ideal, and would be much better to perform
-   // a 'partial' hijacking, but this requires extensive changes to
-   // how cgimap generates its response and will have to remain a
-   // TODO until someone tackles it.
-
-   return "Connection: close\r\n";
-}
-
-void rack_request::finish() {
+void rack_request::finish_internal() {
 }
 
 void process_request_(Object r_req, rate_limiter &rl, const std::string &generator,
