@@ -40,3 +40,16 @@ I haven't yet got to the point of being able to install this as a gem, but you c
 And you can run the tests with:
 
     bundle exec rake test
+
+## Example server
+
+As a toy or example, and useful while developing, there's an example server in the `example/` directory. This starts up WEBrick and uses CGImap to serve requests. For example, to start the server:
+
+    cd example
+	bundle exec ruby server.rb
+
+And, in another terminal:
+
+    curl -v http://localhost:8000/api/0.6/map?bbox=0,0,0,0
+
+Or other API calls. These should return the standard set of headers and XML or JSON documents.
