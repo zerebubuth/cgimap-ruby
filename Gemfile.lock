@@ -1,7 +1,7 @@
 GEM
   remote: https://rubygems.org/
   specs:
-    rack (1.5.2)
+    rack (1.6.0)
     rake (10.3.2)
     rake-compiler (0.9.3)
       rake
@@ -11,6 +11,6 @@ PLATFORMS
   ruby
 
 DEPENDENCIES
-  rack
+  rack (>= 1.6.0)
   rake-compiler
   rice
