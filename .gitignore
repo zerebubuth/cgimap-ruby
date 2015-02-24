@@ -25,3 +25,6 @@
 
 # built objects
 tmp/
+
+# now that we're using gemspec, ignore Gemfile.lock
+Gemfile.lock
