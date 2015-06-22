@@ -7,7 +7,8 @@ Gem::Specification.new do |s|
   s.description = "Cgimap is a library and program which partially implements the OpenStreetMap API. This gem exposes that functionality to Ruby, with the intention of being able to use it from Rails."
   s.authors     = ["Matt Amos"]
   s.email       = 'zerebubuth@gmail.com'
-  s.files       = ["lib/cgimap.rb", "lib/cgimap/cgimap.so"]
+  s.files       = ["lib/cgimap.rb"]
+  s.extensions  = ["ext/cgimap/extconf.rb"]
   s.homepage    = 'https://github.com/zerebubuth/cgimap-ruby'
 
   s.add_development_dependency 'rake-compiler', '>= 0.9.4'
