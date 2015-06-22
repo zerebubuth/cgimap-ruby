@@ -8,7 +8,7 @@ This is still very much work in progress, and probably doesn't even work. Please
 
 ## Installation ##
 
-First, you will need [cgimap](https://github.com/zerebubuth/openstreetmap-cgimap), at least version 0.4 - or master. The README there should explain installing it, and it's basically just your usual `./configure && make && make install` GNU autotools thing.
+First, you will need [cgimap](https://github.com/zerebubuth/openstreetmap-cgimap), at least commit `e7dff10` (anything after 2015-06-22 should be okay). The README there should explain installing it, and it's basically just your usual `./configure && make && make install` GNU autotools thing.
 
 Next, you will need Ruby. I prefer to use [rbenv](http://rbenv.org/) to manage my (user) Ruby installation, and I have not tested this installation with a system-installed Ruby. You'll also need [Bundler](http://bundler.io/). If you don't already have this then you can probably install it by running:
 
