@@ -411,36 +411,29 @@ Object process_request_(Object r_req, rate_limiter &rl, const std::string &gener
   // env['rack.hijack'].call starts the hijacking
   Object hijack = env[String("rack.hijack")];
 
-  if (hijack.is_nil()) {
-    // the Rack we're running in doesn't support hijacking
-    throw std::runtime_error("The version of Rack in use does not support "
-                             "socket hijacking, which cgimap-ruby requires. "
-                             "Support for (partial) hijacking was added to "
-                             "WEBrick in 1.6.0.");
-  }
+  if (!hijack.is_nil()) {
+    // perform the hijack and grab the socket to use later.
+    Object io;
+    try {
+      hijack.call("call");
+      io = env[String("rack.hijack_io")];
 
-  // perform the hijack and grab the socket to use later.
-  Object io;
-  try {
-    hijack.call("call");
-    io = env[String("rack.hijack_io")];
+    } catch (const Rice::Exception_Base &e) {
+      if (e.class_of().to_s().str() != std::string("NotImplementedError")) {
+        throw;
+      }
+    }
 
-  } catch (const Rice::Exception_Base &e) {
-    if (e.class_of().to_s().str() != std::string("NotImplementedError")) {
-      throw;
+    if (!io.is_nil()) {
+      hijack_rack_request req(io, env);
+      process_request(req, rl, generator, r, factory);
+      return Object();
     }
   }
 
-  if (io.is_nil()) {
-    buffered_rack_request req(r_req);
-    process_request(req, rl, generator, r, factory);
-    return req.rack_response();
-
-  } else {
-    hijack_rack_request req(io, env);
-    process_request(req, rl, generator, r, factory);
-    return Object();
-  }
+  buffered_rack_request req(r_req);
+  process_request(req, rl, generator, r, factory);
+  return req.rack_response();
 }
 
 } // anonymous namespace
