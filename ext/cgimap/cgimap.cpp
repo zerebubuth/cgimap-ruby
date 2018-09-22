@@ -26,43 +26,91 @@
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/foreach.hpp>
 #include <boost/format.hpp>
+#include <boost/optional.hpp>
 
 using namespace Rice;
 namespace bpo = boost::program_options;
 namespace bal = boost::algorithm;
 
 namespace {
-bpo::variables_map convert_hash_to_vm(Hash &h) {
-   bpo::variables_map vm;
-   
-   Hash::iterator itr = h.begin();
-   const Hash::iterator end = h.end();
-   for (; itr != end; ++itr) {
-      int k_type = itr->first.rb_type();
-      Object value(itr->second);
-      int v_type = value.rb_type();
-      
-      if ((k_type == T_STRING) ||
-          (k_type == T_SYMBOL)) {
-         std::string key = itr->first.to_s().str();
-         
-         if (v_type == T_FIXNUM) {
-            int i_value = from_ruby<int>(value);
-            vm.insert(std::make_pair(key, bpo::variable_value(i_value, false)));
-            
-         } else {
-            std::string s_value = value.to_s().str();
-            vm.insert(std::make_pair(key, bpo::variable_value(s_value, false)));
-         }
-      }
-   }
 
-   return vm;
+typedef std::map<std::string, bpo::variables_map> defaults_map_t;
+
+boost::optional<std::string> hash_lookup_string(Hash &h, const std::string &k) {
+  boost::optional<std::string> ret_val;
+
+  Hash::iterator itr = h.begin();
+  const Hash::iterator end = h.end();
+
+  for (; itr != end; ++itr) {
+    int k_type = itr->first.rb_type();
+
+    if ((k_type == T_STRING) ||
+      (k_type == T_SYMBOL)) {
+      std::string key = itr->first.to_s().str();
+
+      if (key == "backend") {
+        Object value(itr->second);
+        int v_type = value.rb_type();
+        if (v_type == T_STRING) {
+          ret_val = value.to_s().str();
+          break;
+
+        } else {
+          std::ostringstream out;
+          out << "Configuration option '" << k << "' value must be a string.";
+          throw std::runtime_error(out.str());
+        }
+      }
+    }
+  }
+
+  return ret_val;
+}
+
+bpo::variables_map convert_hash_to_vm(defaults_map_t *defaults, Hash &h) {
+  bpo::variables_map vm;
+
+  // if defaults are available for this backend, assign them before overriding
+  // with any values from the hash.
+  if (defaults) {
+    auto backend_name = hash_lookup_string(h, "backend");
+    if (backend_name) {
+      defaults_map_t::const_iterator itr = defaults->find(*backend_name);
+      if (itr != defaults->end()) {
+        vm = itr->second;
+      }
+    }
+  }
+
+  Hash::iterator itr = h.begin();
+  const Hash::iterator end = h.end();
+  for (; itr != end; ++itr) {
+    int k_type = itr->first.rb_type();
+    Object value(itr->second);
+    int v_type = value.rb_type();
+
+    if ((k_type == T_STRING) ||
+      (k_type == T_SYMBOL)) {
+      std::string key = itr->first.to_s().str();
+
+      if (v_type == T_FIXNUM) {
+        int i_value = from_ruby<int>(value);
+        vm.insert(std::make_pair(key, bpo::variable_value(i_value, false)));
+
+      } else {
+        std::string s_value = value.to_s().str();
+        vm.insert(std::make_pair(key, bpo::variable_value(s_value, false)));
+      }
+    }
+  }
+
+  return vm;
 }
 
 struct construct_rate_limiter {
    static void construct(Object self, Hash h) {
-      bpo::variables_map vm = convert_hash_to_vm(h);
+      bpo::variables_map vm = convert_hash_to_vm(NULL, h);
 
       DATA_PTR(self.value()) = new memcached_rate_limiter(vm); // new rate_limiter(vm);
    }
@@ -70,21 +118,46 @@ struct construct_rate_limiter {
 
 typedef boost::shared_ptr<data_selection::factory> factory_ptr_t;
 
+void register_backend_and_defaults(
+  defaults_map_t *defaults,
+  boost::shared_ptr<backend> backend_ptr) {
+
+  register_backend(backend_ptr);
+
+  std::string backend_name = backend_ptr->name();
+  bpo::variables_map vm;
+
+  auto const &options = backend_ptr->options();
+  for (auto option_desc : options.options()) {
+    auto value = option_desc->semantic();
+    boost::any default_value;
+    if (value->apply_default(default_value)) {
+      bpo::variable_value var(default_value, true);
+      vm.insert(std::make_pair(option_desc->long_name(), var));
+    }
+  }
+
+  defaults->insert(std::make_pair(backend_name, vm));
+}
+
 factory_ptr_t create_backend_(Hash h) {
   static bool once = true;
-  bpo::variables_map vm = convert_hash_to_vm(h);
+  static defaults_map_t *defaults = NULL;
 
   if (once) {
     once = false;
+    defaults = new defaults_map_t;
 
 #if ENABLE_APIDB
-    register_backend(make_apidb_backend());
+    register_backend_and_defaults(defaults, make_apidb_backend());
 #endif
 #if ENABLE_PGSNAPSHOT
-    register_backend(make_pgsnapshot_backend());
+    register_backend_and_defaults(defaults, make_pgsnapshot_backend());
 #endif
-    register_backend(make_staticxml_backend());
+    register_backend_and_defaults(defaults, make_staticxml_backend());
   }
+
+  bpo::variables_map vm = convert_hash_to_vm(defaults, h);
 
   return create_backend(vm);
 }
